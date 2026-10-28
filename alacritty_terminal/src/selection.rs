@@ -134,23 +134,20 @@ impl Selection {
         self.region.end = Anchor::new(point, side);
     }
 
-    /// Change the selection type and update its end, preserving the expanded start boundary.
-    pub fn expand<T>(&mut self, term: &Term<T>, ty: SelectionType, point: Point, side: Side) {
-        if self.ty != ty && matches!(self.ty, SelectionType::Semantic | SelectionType::Lines) {
-            if let Some(range) = self.to_range(term) {
-                let backwards = self.region.start.point > self.region.end.point
-                    || (self.region.start.point == self.region.end.point
-                        && point < self.region.start.point);
-                self.region.start = if backwards {
-                    Anchor::new(range.end, Side::Right)
-                } else {
-                    Anchor::new(range.start, Side::Left)
-                };
-            }
-        }
-
-        self.ty = ty;
-        self.update(point, side);
+    /// Set resolved boundaries, optionally orienting them towards a new endpoint.
+    ///
+    /// Return the moving endpoint so the vi cursor can follow the resolved boundary.
+    pub(crate) fn set_range(&mut self, range: SelectionRange, point: Option<Point>) -> Point {
+        let backwards = match point {
+            Some(point) if point < range.start => true,
+            Some(point) if point > range.end => false,
+            Some(point) if point != self.region.start.point => point < self.region.start.point,
+            _ => self.region.start.point > self.region.end.point,
+        };
+        let start = Anchor::new(range.start, Side::Left);
+        let end = Anchor::new(range.end, Side::Right);
+        self.region = if backwards { end..start } else { start..end };
+        self.region.end.point
     }
 
     pub fn rotate<D: Dimensions>(
@@ -563,98 +560,6 @@ mod tests {
             end: Point::new(Line(5), Column(3)),
             is_block: false,
         });
-    }
-
-    #[test]
-    fn expand_line_selection() {
-        let term = term(10, 10);
-
-        for (origin, end, target, expected_start, expected_end) in [
-            ((2, 4), (4, 6), (6, 3), (2, 0), (6, 3)),
-            ((4, 4), (2, 6), (0, 3), (0, 4), (4, 9)),
-            ((2, 4), (2, 4), (6, 3), (2, 0), (6, 3)),
-            ((4, 4), (4, 4), (0, 3), (0, 4), (4, 9)),
-        ] {
-            let point = |(line, column)| Point::new(Line(line), Column(column));
-            let mut selection = Selection::new(SelectionType::Lines, point(origin), Side::Left);
-            selection.update(point(end), Side::Right);
-            selection.expand(&term, SelectionType::Simple, point(target), Side::Right);
-
-            assert_eq!(selection.to_range(&term).unwrap(), SelectionRange {
-                start: point(expected_start),
-                end: point(expected_end),
-                is_block: false,
-            });
-        }
-    }
-
-    #[test]
-    fn expand_semantic_selection() {
-        let mut term = term(2, 11);
-        for (column, c) in "foo bar baz".chars().enumerate() {
-            term.grid_mut()[Line(0)][Column(column)].c = c;
-        }
-
-        for (target, start, end) in [(0, 0, 6), (10, 4, 10)] {
-            let mut selection =
-                Selection::new(SelectionType::Semantic, Point::new(Line(0), Column(5)), Side::Left);
-            selection.expand(
-                &term,
-                SelectionType::Simple,
-                Point::new(Line(0), Column(target)),
-                if target == 0 { Side::Left } else { Side::Right },
-            );
-
-            assert_eq!(selection.to_range(&term).unwrap(), SelectionRange {
-                start: Point::new(Line(0), Column(start)),
-                end: Point::new(Line(0), Column(end)),
-                is_block: false,
-            });
-        }
-    }
-
-    #[test]
-    fn expand_wrapped_line_selection() {
-        let mut term = term(6, 5);
-        term.grid_mut()[Line(1)][Column(4)].flags.insert(Flags::WRAPLINE);
-        term.grid_mut()[Line(2)][Column(4)].flags.insert(Flags::WRAPLINE);
-
-        for (target, start, end) in [(0, (0, 2), (3, 4)), (5, (1, 0), (5, 2))] {
-            let mut selection =
-                Selection::new(SelectionType::Lines, Point::new(Line(2), Column(3)), Side::Left);
-            selection.expand(
-                &term,
-                SelectionType::Simple,
-                Point::new(Line(target), Column(2)),
-                if target == 0 { Side::Left } else { Side::Right },
-            );
-
-            assert_eq!(selection.to_range(&term).unwrap(), SelectionRange {
-                start: Point::new(Line(start.0), Column(start.1)),
-                end: Point::new(Line(end.0), Column(end.1)),
-                is_block: false,
-            });
-        }
-    }
-
-    #[test]
-    fn expand_same_selection_type() {
-        let term = term(6, 5);
-        for ty in [
-            SelectionType::Simple,
-            SelectionType::Block,
-            SelectionType::Semantic,
-            SelectionType::Lines,
-        ] {
-            let origin = Point::new(Line(2), Column(2));
-            let mut selection = Selection::new(ty, origin, Side::Left);
-            selection.update(Point::new(Line(4), Column(3)), Side::Right);
-            selection.expand(&term, ty, Point::new(Line(0), Column(1)), Side::Left);
-
-            let mut expected = Selection::new(ty, origin, Side::Left);
-            expected.update(Point::new(Line(0), Column(1)), Side::Left);
-            assert_eq!(selection, expected);
-        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- `Selection::expand` to change selection type while preserving expanded boundaries
+- `Term::set_selection_type` and `Term::expand_selection` to preserve resolved selection boundaries
 
 ### Fixed
 

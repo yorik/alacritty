@@ -764,26 +764,12 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         *self.dirty |= selection.is_some_and(|s| !s.is_empty());
     }
 
-    fn update_selection(&mut self, mut point: Point, side: Side) {
-        let mut selection = match self.terminal.selection.take() {
-            Some(selection) => selection,
+    fn update_selection(&mut self, point: Point, side: Side) {
+        let ty = match self.terminal.selection.as_ref() {
+            Some(selection) => selection.ty,
             None => return,
         };
-
-        // Treat motion over message bar like motion over the last line.
-        point.line = min(point.line, self.terminal.bottommost_line());
-
-        // Update selection.
-        selection.update(point, side);
-
-        // Move vi cursor and expand selection.
-        if self.terminal.mode().contains(TermMode::VI) && !self.search_active() {
-            self.terminal.vi_mode_cursor.point = point;
-            selection.include_all();
-        }
-
-        self.terminal.selection = Some(selection);
-        *self.dirty = true;
+        self.update_selection_with_type(ty, point, side);
     }
 
     fn start_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
@@ -799,7 +785,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
                 self.clear_selection();
             },
             Some(selection) if !selection.is_empty() => {
-                selection.ty = ty;
+                self.terminal.set_selection_type(ty);
                 *self.dirty = true;
 
                 self.copy_selection(ClipboardType::Selection);
@@ -1288,26 +1274,9 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
         // Load mouse point, treating message bar and padding as the closest cell.
         let display_offset = self.terminal().grid().display_offset();
-        let mut point = self.mouse().point(&self.size_info(), display_offset);
-        point.line = min(point.line, self.terminal.bottommost_line());
-
+        let point = self.mouse().point(&self.size_info(), display_offset);
         let cell_side = self.mouse().cell_side;
-
-        let mut selection = match self.terminal_mut().selection.take() {
-            Some(selection) => selection,
-            None => return,
-        };
-
-        selection.expand(self.terminal(), selection_type, point, cell_side);
-
-        // Move vi mode cursor to mouse click position.
-        if self.terminal().mode().contains(TermMode::VI) && !self.search_active() {
-            self.terminal_mut().vi_mode_cursor.point = point;
-            selection.include_all();
-        }
-
-        self.terminal_mut().selection = Some(selection);
-        self.mark_dirty();
+        self.update_selection_with_type(selection_type, point, cell_side);
     }
 
     /// Get the semantic word at the specified point.
@@ -1504,6 +1473,26 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 }
 
 impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
+    fn update_selection_with_type(&mut self, ty: SelectionType, mut point: Point, side: Side) {
+        if self.terminal.selection.is_none() {
+            return;
+        }
+
+        // Treat motion over message bar like motion over the last line.
+        point.line = min(point.line, self.terminal.bottommost_line());
+        self.terminal.expand_selection(ty, point, side);
+
+        // Move vi cursor and include the cells at both selection endpoints.
+        if self.terminal.mode().contains(TermMode::VI) && !self.search_active() {
+            self.terminal.vi_mode_cursor.point = point;
+            if let Some(selection) = &mut self.terminal.selection {
+                selection.include_all();
+            }
+        }
+
+        *self.dirty = true;
+    }
+
     fn update_search(&mut self) {
         let regex = match self.search_state.regex() {
             Some(regex) => regex,

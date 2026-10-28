@@ -15,9 +15,12 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Fixed `alacritty-escapes(7)` manpage missing from macOS install
 - Added the `Open Alacritty here` entry to the right-click context menu for folders on Windows
 
+### Changed
+
+- Preserve word and line boundaries when changing selection type
+
 ### Fixed
 
-- Right-click selection expansion losing the original word or line boundary
 - Spurious "Failed to set new owner of XCB selection" warnings on X11
 - Lacking permissions to launch software sending Apple events
 - Off-by-one in vi mode ParagraphUp action

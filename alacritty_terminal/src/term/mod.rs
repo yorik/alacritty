@@ -525,6 +525,40 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
+    /// Change selection type while preserving resolved word and line boundaries.
+    pub fn set_selection_type(&mut self, ty: SelectionType) {
+        if let Some(point) = self.set_selection_type_at(ty, None) {
+            if self.mode.contains(TermMode::VI) {
+                self.vi_mode_cursor.point = point;
+            }
+        }
+    }
+
+    /// Change selection type and extend it to a new endpoint.
+    pub fn expand_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
+        self.set_selection_type_at(ty, Some(point));
+        if let Some(selection) = &mut self.selection {
+            selection.update(point, side);
+        }
+    }
+
+    /// Resolve boundaries before changing type, without temporarily removing the selection.
+    fn set_selection_type_at(&mut self, ty: SelectionType, point: Option<Point>) -> Option<Point> {
+        let range = self
+            .selection
+            .as_ref()
+            .filter(|selection| {
+                selection.ty != ty
+                    && matches!(selection.ty, SelectionType::Semantic | SelectionType::Lines)
+            })
+            .and_then(|selection| selection.to_range(self));
+
+        let selection = self.selection.as_mut()?;
+        let end = range.map(|range| selection.set_range(range, point));
+        selection.ty = ty;
+        end
+    }
+
     /// Convert the active selection to a String.
     pub fn selection_to_string(&self) -> Option<String> {
         let selection_range = self.selection.as_ref().and_then(|s| s.to_range(self))?;
@@ -2730,6 +2764,281 @@ mod tests {
             s.update(Point { line: Line(3), column: Column(4) }, Side::Right);
         }
         assert_eq!(term.selection_to_string(), Some(String::from("\na\"\na\"\na")));
+    }
+
+    fn selection_term() -> Term<VoidListener> {
+        test::mock_term(
+            "zero line\r\nfirst line\r\nsecond line\r\nthird line\r\nfourth line\r\nfifth \
+             line\r\nsixth line",
+        )
+    }
+
+    #[test]
+    fn expand_line_selection_downward() {
+        let mut term = selection_term();
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(2), Column(4)), Side::Left);
+        selection.update(Point::new(Line(4), Column(6)), Side::Right);
+        term.selection = Some(selection);
+
+        // A right-click below a dragged line selection must keep its first line complete.
+        term.expand_selection(SelectionType::Simple, Point::new(Line(6), Column(3)), Side::Right);
+
+        assert_eq!(term.selection.as_ref().unwrap().to_range(&term).unwrap(), SelectionRange {
+            start: Point::new(Line(2), Column(0)),
+            end: Point::new(Line(6), Column(3)),
+            is_block: false,
+        });
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            "second line\nthird line\nfourth line\nfifth line\nsixt"
+        );
+    }
+
+    #[test]
+    fn expand_line_selection_upward() {
+        let mut term = selection_term();
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(4), Column(4)), Side::Left);
+        selection.update(Point::new(Line(2), Column(6)), Side::Right);
+        term.selection = Some(selection);
+
+        // Preserve the complete last line when extending an upward drag further upward.
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(3)), Side::Left);
+
+        assert_eq!(term.selection.as_ref().unwrap().to_range(&term).unwrap(), SelectionRange {
+            start: Point::new(Line(0), Column(3)),
+            end: Point::new(Line(4), Column(10)),
+            is_block: false,
+        });
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            "o line\nfirst line\nsecond line\nthird line\nfourth line"
+        );
+    }
+
+    #[test]
+    fn expand_line_selection_reverse_upward_drag() {
+        let mut term = selection_term();
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(4), Column(4)), Side::Left);
+        selection.update(Point::new(Line(2), Column(6)), Side::Right);
+        term.selection = Some(selection);
+
+        // Clicking below the selection must not keep an anchor after the original last line.
+        term.expand_selection(SelectionType::Simple, Point::new(Line(6), Column(3)), Side::Right);
+
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            "second line\nthird line\nfourth line\nfifth line\nsixt"
+        );
+    }
+
+    #[test]
+    fn expand_line_selection_reverse_downward_drag() {
+        let mut term = selection_term();
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(2), Column(4)), Side::Left);
+        selection.update(Point::new(Line(4), Column(6)), Side::Right);
+        term.selection = Some(selection);
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(3)), Side::Left);
+
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            "o line\nfirst line\nsecond line\nthird line\nfourth line"
+        );
+    }
+
+    #[test]
+    fn expand_single_line_selection_downward() {
+        let mut term = selection_term();
+        term.selection =
+            Some(Selection::new(SelectionType::Lines, Point::new(Line(4), Column(4)), Side::Left));
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(6), Column(3)), Side::Right);
+
+        assert_eq!(term.selection_to_string().unwrap(), "fourth line\nfifth line\nsixt");
+    }
+
+    #[test]
+    fn expand_single_line_selection_upward() {
+        let mut term = selection_term();
+        term.selection =
+            Some(Selection::new(SelectionType::Lines, Point::new(Line(4), Column(4)), Side::Left));
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(3)), Side::Left);
+
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            "o line\nfirst line\nsecond line\nthird line\nfourth line"
+        );
+    }
+
+    #[test]
+    fn expand_semantic_selection_left() {
+        let mut term = test::mock_term("foo bar baz");
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            Point::new(Line(0), Column(5)),
+            Side::Left,
+        ));
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+
+        assert_eq!(term.selection_to_string().unwrap(), "foo bar");
+    }
+
+    #[test]
+    fn expand_semantic_selection_right() {
+        let mut term = test::mock_term("foo bar baz");
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            Point::new(Line(0), Column(5)),
+            Side::Right,
+        ));
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(10)), Side::Right);
+
+        assert_eq!(term.selection_to_string().unwrap(), "bar baz");
+    }
+
+    #[test]
+    fn expand_wrapped_line_selection_upward() {
+        let mut term = test::mock_term("above\r\nfirst\nwraps\nlast!\r\nbelow");
+        term.selection =
+            Some(Selection::new(SelectionType::Lines, Point::new(Line(2), Column(3)), Side::Left));
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(2)), Side::Left);
+
+        assert_eq!(term.selection_to_string().unwrap(), "ove\nfirstwrapslast!");
+    }
+
+    #[test]
+    fn expand_wrapped_line_selection_downward() {
+        let mut term = test::mock_term("above\r\nfirst\nwraps\nlast!\r\nbelow");
+        term.selection =
+            Some(Selection::new(SelectionType::Lines, Point::new(Line(2), Column(3)), Side::Right));
+
+        term.expand_selection(SelectionType::Simple, Point::new(Line(4), Column(2)), Side::Right);
+
+        assert_eq!(term.selection_to_string().unwrap(), "firstwrapslast!\nbel");
+    }
+
+    #[test]
+    fn vi_change_semantic_selection_type() {
+        let mut term = test::mock_term("foo bar baz");
+        term.toggle_vi_mode();
+        term.vi_mode_cursor.point = Point::new(Line(0), Column(5));
+        term.selection =
+            Some(Selection::new(SelectionType::Semantic, term.vi_mode_cursor.point, Side::Left));
+
+        // Switching to character selection keeps the whole word and aligns the vi cursor.
+        term.set_selection_type(SelectionType::Simple);
+        assert_eq!(term.selection_to_string().unwrap(), "bar");
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(0), Column(6)));
+
+        term.vi_motion(ViMotion::Left);
+        assert_eq!(term.selection_to_string().unwrap(), "ba");
+    }
+
+    #[test]
+    fn vi_change_line_selection_type() {
+        let mut term = selection_term();
+        term.toggle_vi_mode();
+        term.vi_mode_cursor.point = Point::new(Line(4), Column(6));
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(2), Column(4)), Side::Left);
+        selection.update(term.vi_mode_cursor.point, Side::Right);
+        term.selection = Some(selection);
+
+        term.set_selection_type(SelectionType::Simple);
+        assert_eq!(term.selection_to_string().unwrap(), "second line\nthird line\nfourth line");
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(4), Column(10)));
+
+        term.vi_motion(ViMotion::Up);
+        assert_eq!(term.selection_to_string().unwrap(), "second line\nthird line");
+    }
+
+    #[test]
+    fn vi_change_backward_line_selection_type() {
+        let mut term = selection_term();
+        term.toggle_vi_mode();
+        term.vi_mode_cursor.point = Point::new(Line(2), Column(6));
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(4), Column(4)), Side::Left);
+        selection.update(term.vi_mode_cursor.point, Side::Left);
+        term.selection = Some(selection);
+
+        term.set_selection_type(SelectionType::Simple);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(2), Column(0)));
+        assert_eq!(term.selection_to_string().unwrap(), "second line\nthird line\nfourth line");
+
+        term.vi_motion(ViMotion::Right);
+        assert_eq!(term.selection_to_string().unwrap(), "econd line\nthird line\nfourth line");
+    }
+
+    #[test]
+    fn vi_expand_semantic_selection() {
+        let mut term = test::mock_term("foo bar baz");
+        term.toggle_vi_mode();
+        term.vi_mode_cursor.point = Point::new(Line(0), Column(5));
+        term.selection =
+            Some(Selection::new(SelectionType::Semantic, term.vi_mode_cursor.point, Side::Left));
+
+        let point = Point::new(Line(0), Column(10));
+        term.expand_selection(SelectionType::Simple, point, Side::Left);
+        term.vi_goto_point(point);
+        assert_eq!(term.selection_to_string().unwrap(), "bar baz");
+
+        term.vi_motion(ViMotion::Left);
+        assert_eq!(term.selection_to_string().unwrap(), "bar ba");
+    }
+
+    #[test]
+    fn vi_expand_line_selection() {
+        let mut term = selection_term();
+        term.toggle_vi_mode();
+        let mut selection =
+            Selection::new(SelectionType::Lines, Point::new(Line(2), Column(4)), Side::Left);
+        selection.update(Point::new(Line(4), Column(6)), Side::Right);
+        term.selection = Some(selection);
+
+        // Follow mouse expansion with the vi cursor update, which includes both endpoint cells.
+        let point = Point::new(Line(0), Column(3));
+        term.expand_selection(SelectionType::Simple, point, Side::Right);
+        term.vi_goto_point(point);
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            "o line\nfirst line\nsecond line\nthird line\nfourth line"
+        );
+
+        term.vi_motion(ViMotion::Right);
+        assert_eq!(
+            term.selection_to_string().unwrap(),
+            " line\nfirst line\nsecond line\nthird line\nfourth line"
+        );
+    }
+
+    #[test]
+    fn expand_same_selection_type() {
+        let mut term = selection_term();
+        for ty in [
+            SelectionType::Simple,
+            SelectionType::Block,
+            SelectionType::Semantic,
+            SelectionType::Lines,
+        ] {
+            let origin = Point::new(Line(2), Column(2));
+            let mut selection = Selection::new(ty, origin, Side::Left);
+            selection.update(Point::new(Line(4), Column(3)), Side::Right);
+            term.selection = Some(selection);
+            term.expand_selection(ty, Point::new(Line(0), Column(1)), Side::Left);
+
+            let mut expected = Selection::new(ty, origin, Side::Left);
+            expected.update(Point::new(Line(0), Column(1)), Side::Left);
+            assert_eq!(term.selection.as_ref().unwrap(), &expected);
+        }
     }
 
     /// Check that the grid can be serialized back and forth losslessly.
