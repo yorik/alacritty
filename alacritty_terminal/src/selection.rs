@@ -119,6 +119,8 @@ pub enum SelectionType {
 pub struct Selection {
     pub ty: SelectionType,
     region: Range<Anchor>,
+    /// Whether the fixed anchor is a resolved boundary rather than an inclusive cell.
+    start_is_boundary: bool,
 }
 
 impl Selection {
@@ -126,6 +128,7 @@ impl Selection {
         Self {
             region: Range { start: Anchor::new(location, side), end: Anchor::new(location, side) },
             ty,
+            start_is_boundary: false,
         }
     }
 
@@ -147,6 +150,7 @@ impl Selection {
         let start = Anchor::new(range.start, Side::Left);
         let end = Anchor::new(range.end, Side::Right);
         self.region = if backwards { end..start } else { start..end };
+        self.start_is_boundary = true;
         self.region.end.point
     }
 
@@ -204,6 +208,11 @@ impl Selection {
         }
 
         Some(self)
+    }
+
+    /// Whether vi cursor movement should update this selection.
+    pub(crate) fn is_active(&self) -> bool {
+        self.start_is_boundary || !self.is_empty()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -264,7 +273,7 @@ impl Selection {
         range_bottom >= start && range_top <= end
     }
 
-    /// Expand selection sides to include all cells.
+    /// Include endpoint cells, preserving a fixed anchor resolved from a word or line boundary.
     pub fn include_all(&mut self) {
         let (start, end) = (self.region.start.point, self.region.end.point);
         let (start_side, end_side) = match self.ty {
@@ -279,7 +288,9 @@ impl Selection {
             _ => (Side::Left, Side::Right),
         };
 
-        self.region.start.side = start_side;
+        if !self.start_is_boundary {
+            self.region.start.side = start_side;
+        }
         self.region.end.side = end_side;
     }
 

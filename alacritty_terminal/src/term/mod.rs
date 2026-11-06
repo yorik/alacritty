@@ -907,8 +907,8 @@ impl<T> Term<T> {
             return;
         }
 
-        // Update only if non-empty selection is present.
-        if let Some(selection) = self.selection.as_mut().filter(|s| !s.is_empty()) {
+        // A resolved selection stays active while crossing an empty range at its fixed boundary.
+        if let Some(selection) = self.selection.as_mut().filter(|s| s.is_active()) {
             selection.update(self.vi_mode_cursor.point, Side::Left);
             selection.include_all();
         }
@@ -2993,6 +2993,118 @@ mod tests {
 
         term.vi_motion(ViMotion::Left);
         assert_eq!(term.selection_to_string().unwrap(), "bar ba");
+    }
+
+    #[test]
+    fn vi_selection_crossing_word_anchor_matches_mouse() {
+        let mut term = test::mock_term("abcdefghijk\r\nfoo bar baz\r\nABCDEFGHIJK");
+        term.toggle_vi_mode();
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            Point::new(Line(1), Column(5)),
+            Side::Left,
+        ));
+
+        let point = Point::new(Line(1), Column(10));
+        term.expand_selection(SelectionType::Simple, point, Side::Right);
+        term.vi_goto_point(point);
+        let selection = term.selection.clone();
+
+        term.vi_motion(ViMotion::Up);
+        let keyboard_text = term.selection_to_string().unwrap();
+        assert_eq!(keyboard_text, "k\nfoo ");
+
+        // Move the mouse to the same cell, starting from the same expanded selection.
+        term.toggle_vi_mode();
+        term.selection = selection;
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(10)), Side::Left);
+
+        assert_eq!(keyboard_text, term.selection_to_string().unwrap());
+    }
+
+    #[test]
+    fn vi_selection_crossing_backward_word_anchor_matches_mouse() {
+        let mut term = test::mock_term("abcdefghijk\r\nfoo bar baz\r\nABCDEFGHIJK");
+        term.toggle_vi_mode();
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            Point::new(Line(1), Column(5)),
+            Side::Left,
+        ));
+
+        let point = Point::new(Line(1), Column(0));
+        term.expand_selection(SelectionType::Simple, point, Side::Left);
+        term.vi_goto_point(point);
+        let selection = term.selection.clone();
+
+        term.vi_motion(ViMotion::Down);
+        let keyboard_text = term.selection_to_string().unwrap();
+        assert_eq!(keyboard_text, " baz\nA");
+
+        term.toggle_vi_mode();
+        term.selection = selection;
+        term.expand_selection(SelectionType::Simple, Point::new(Line(2), Column(0)), Side::Right);
+
+        assert_eq!(keyboard_text, term.selection_to_string().unwrap());
+    }
+
+    #[test]
+    fn vi_selection_moves_across_word_boundary() {
+        let mut term = test::mock_term("foo bar baz");
+        term.toggle_vi_mode();
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            Point::new(Line(0), Column(5)),
+            Side::Left,
+        ));
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(10)), Side::Right);
+
+        // Keep including the moving cursor's cell on either side of the fixed boundary.
+        term.vi_goto_point(Point::new(Line(0), Column(3)));
+        assert_eq!(term.selection_to_string().unwrap(), " ");
+
+        term.vi_motion(ViMotion::Left);
+        assert_eq!(term.selection_to_string().unwrap(), "o ");
+
+        term.vi_motion(ViMotion::Right);
+        assert_eq!(term.selection_to_string().unwrap(), " ");
+        term.vi_motion(ViMotion::Right);
+        assert_eq!(term.selection_to_string().unwrap(), "b");
+    }
+
+    #[test]
+    fn vi_selection_moves_through_empty_backward_word_boundary() {
+        let mut term = test::mock_term("foo bar baz");
+        term.toggle_vi_mode();
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            Point::new(Line(0), Column(5)),
+            Side::Left,
+        ));
+        term.expand_selection(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+
+        // Cross the preserved boundary after "r" in the opposite direction.
+        term.vi_goto_point(Point::new(Line(0), Column(6)));
+        assert!(term.selection_to_string().is_none());
+
+        term.vi_motion(ViMotion::Right);
+        assert_eq!(term.selection_to_string().unwrap(), " ");
+        term.vi_motion(ViMotion::Right);
+        assert_eq!(term.selection_to_string().unwrap(), " b");
+    }
+
+    #[test]
+    fn vi_character_selection_keeps_inclusive_anchor() {
+        let mut term = test::mock_term("abcdefghijk\r\nfoo bar baz");
+        term.toggle_vi_mode();
+        term.selection =
+            Some(Selection::new(SelectionType::Simple, Point::new(Line(1), Column(4)), Side::Left));
+        term.selection.as_mut().unwrap().include_all();
+        term.vi_goto_point(Point::new(Line(1), Column(10)));
+
+        term.vi_motion(ViMotion::Up);
+
+        assert_eq!(term.selection_to_string().unwrap(), "k\nfoo b");
     }
 
     #[test]
